@@ -9,7 +9,11 @@ pub mod Mouse {
         Released,
     }
 
-
+    #[derive(PartialEq, Clone, Copy, Debug)]
+    pub enum KeyState {
+        Pressed,
+        Released,
+    }
 
     #[derive(PartialEq, Clone, Copy, Debug, Default)]
     pub struct MousePosition {
@@ -32,6 +36,8 @@ pub mod Mouse {
     static MOUSE_STATE : atomic::AtomicBool = atomic::AtomicBool::new(false);
     static RMB_STATE : atomic::AtomicBool = atomic::AtomicBool::new(false);
     static MMB_STATE : atomic::AtomicBool = atomic::AtomicBool::new(false);
+
+    static SHIFT_STATE : atomic::AtomicBool = atomic::AtomicBool::new(false);
 
     pub fn set_mouse_pos(pos : MousePosition) {
         match MOUSE_POS.lock() {
@@ -70,6 +76,20 @@ pub mod Mouse {
             true => MouseState::Pressed,
             false => MouseState::Released,
         }
+    }
+
+    pub fn get_shift_state() -> KeyState {
+        match SHIFT_STATE.load(Relaxed) {
+            true => KeyState::Pressed,
+            false => KeyState::Released,
+        }
+    }
+
+    pub fn set_shift_up() {
+        SHIFT_STATE.store(false, Relaxed);
+    }
+    pub fn set_shift_down() {
+        SHIFT_STATE.store(true, Relaxed);
     }
 
     pub fn set_RMB_down() {

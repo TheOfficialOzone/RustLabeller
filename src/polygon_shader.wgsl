@@ -6,6 +6,7 @@ struct Camera {
     x : f32,
     y : f32,
     zoom : f32,
+    aspect_ratio : f32,
 }
 
 @group(0) @binding(0)
@@ -27,12 +28,13 @@ fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
     var out: VertexOutput;
-    
+
     var model_position = model.position;
     model_position.x -= camera.x / 800;
     model_position.y -= camera.y / 600;
 
     model_position /= camera.zoom;
+    model_position.x /= camera.aspect_ratio;
 
     out.value = model.value;
     // out.value.x = model.position.x;
@@ -49,15 +51,15 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // if in.value.y < 0.1 || in.value.x < 0.1 || in.value.z < 0.1 {// 
+    // if in.value.y < 0.1 || in.value.x < 0.1 || in.value.z < 0.1 {//
     //     return vec4<f32>(1, 0, 0, 0.5);
     //     // discard;
     // }
 
-    // return vec4<f32>(in.value.x, in.value.y, in.value.z, 0.5);
-    return vec4<f32>(0, 0, 1, 0.5);
+    return vec4<f32>(in.value.x, in.value.y, in.value.z, 0.5);
+    // return vec4<f32>(0, 0, 1, 0.5);
 }
- 
+
 
 /*
 struct VertexOutput {

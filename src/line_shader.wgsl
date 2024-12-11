@@ -5,6 +5,7 @@ struct Camera {
     x : f32,
     y : f32,
     zoom : f32,
+    aspect_ratio : f32,
 }
 
 @group(0) @binding(0)
@@ -31,6 +32,8 @@ fn vs_main(
     model_position.y -= camera.y / 600;
 
     model_position /= camera.zoom;
+
+    model_position.x /= camera.aspect_ratio;
 
     out.clip_position = vec4<f32>(model_position, 1.0) ;
     return out;

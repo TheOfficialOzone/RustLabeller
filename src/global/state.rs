@@ -1,13 +1,18 @@
+use std::sync::atomic::AtomicU32;
+
 use atomic_enum::atomic_enum;
 
 #[atomic_enum]
 #[derive(PartialEq)]
-enum EditState {
+pub enum EditState {
     New = 0,
     Additive,
     Subtract,
-    Split,
+    Select,
 }
 
-static EDIT_STATE : AtomicEditState = AtomicEditState::new(EditState::New);
-// static EDIT_STATE : std::sync::Mutex<EditState> = std::sync::Mutex::new(EditState { NEW });
+pub static EDIT_STATE : AtomicEditState = AtomicEditState::new(EditState::New);
+
+// Probably a better way to do this but...
+pub static WINDOW_SIZE_X : AtomicU32 = AtomicU32::new(0);
+pub static WINDOW_SIZE_Y : AtomicU32 = AtomicU32::new(0);

@@ -6,6 +6,7 @@ struct Camera {
     x : f32,
     y : f32,
     zoom : f32,
+    aspect_ratio : f32,
 }
 
 @group(1) @binding(0)
@@ -21,7 +22,6 @@ struct VertexOutput {
     @location(0) tex_coords: vec2<f32>,
 }
 
-// @group(0)
 
 @vertex
 fn vs_main(
@@ -35,6 +35,7 @@ fn vs_main(
     model_position.y -= camera.y / 600;
 
     model_position /= camera.zoom;
+    model_position.x /= camera.aspect_ratio;
 
     out.clip_position = vec4<f32>(model_position, 1.0) ;
     return out;
@@ -52,7 +53,7 @@ var s_diffuse: sampler;
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(t_diffuse, s_diffuse, in.tex_coords);
 }
- 
+
 
 /*
 struct VertexOutput {

@@ -1,5 +1,6 @@
-use std::sync::Arc;
+#![allow(warnings)]
 
+use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -13,13 +14,12 @@ use RustMusicPlayer::State;
 
 struct App<'a> {
     state: Option<State<'a>>,
+
     window: Option<Arc<Window>>,
 }
 
 impl ApplicationHandler for App<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        println!("YOLO");
-
         let window = Arc::new(event_loop
             .create_window(Window::default_attributes())
             .unwrap());
@@ -44,19 +44,22 @@ impl ApplicationHandler for App<'_> {
                         ..
                     },
                 ..
-            } => { todo!() },
+            } => {
+                event_loop.exit();
+            },
             WindowEvent::Resized(physical_size) => {
                 self.state.as_mut().unwrap().resize(physical_size);
+                // let _ = self.state.as_mut().unwrap().render();
             },
             WindowEvent::RedrawRequested => {
                 self.state.as_mut().unwrap().update();
-                let _ = self.state.as_mut().unwrap().render();
+                let _ = self.state.as_mut().unwrap().render(self.window.as_ref().unwrap());
             },
             _ => {}
         }
         match self.state.as_mut() {
             None => (),
-            Some(state) => {state.input(&event);}
+            Some(state) => {state.input(self.window.as_ref().unwrap(), &event);}
         }
     }
 }

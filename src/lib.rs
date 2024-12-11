@@ -2,15 +2,26 @@ mod texture;
 mod annotation;
 mod input_controller;
 mod global;
+mod ui;
+mod egui_tools;
+
+use crate::egui_tools::EguiRenderer;
+use egui_wgpu::{wgpu, ScreenDescriptor};
+use std::sync::atomic::Ordering::Relaxed;
 
 use std::sync::Arc;
 use annotation::manager::LabelManager;
-use geo::{Line, Point};
+use geo::{coord, Line, Point};
+use global::state::{EditState, EDIT_STATE};
 use i_triangle::{i_overlay::{core::fill_rule::FillRule, i_float::{f32_point::F32Point, f64_point::F64Point}}, triangulation::float::FloatTriangulate};
-use input_controller::Mouse::{MousePosition, MouseState};
+use input_controller::Mouse::{get_shift_state, set_shift_down, set_shift_up, KeyState, MousePosition, MouseState};
+use ui::ui_manager::{UIManager, UIElement, UIArea, UIButton, ScreenCoord};
 // lib.rs
-use winit::{event::{ElementState, MouseButton, WindowEvent}, window::Window};
+use winit::{event::{ElementState, KeyEvent, MouseButton, WindowEvent}, keyboard::{Key, KeyLocation}, platform::modifier_supplement::KeyEventExtModifierSupplement, window::Window};
 use wgpu::{util::DeviceExt, MemoryHints};
+
+// use crate::ui::
+
 
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -20,7 +31,7 @@ struct Position {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Zoom(f32);
 
 impl Default for Zoom {
@@ -30,11 +41,22 @@ impl Default for Zoom {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AspectRatio(f32);
+impl Default for AspectRatio {
+    fn default() -> Self {
+        return AspectRatio(1.0);
+    }
+}
+
+#[repr(C)]
 #[derive(Default, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Camera {
     pos : Position,
     zoom : Zoom,
+    aspect_ratio : AspectRatio,
 }
+
 
 
 // lib.rs
@@ -131,9 +153,11 @@ const INDICES: &[u16] = &[
     // 2, 3, 4,
 ];
 
+#[derive(PartialEq, Eq)]
 enum Selection {
     None,
     Selected(usize),
+    MultiSelection(Vec<usize>),
 }
 
 
@@ -143,14 +167,17 @@ pub struct State<'a> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+
+
+    // EGUI
+    egui_renderer : egui_tools::EguiRenderer,
+    scale_factor : f32,
     // The window must be declared after the surface so
     // it gets dropped after it as the surface contains
     // unsafe references to the window's resources.
     // pub window: &'a Window,
 
     render_pipeline: wgpu::RenderPipeline,
-    render_pipeline_2 : wgpu::RenderPipeline,
-    render_pipeline_3 : wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
@@ -171,9 +198,12 @@ pub struct State<'a> {
 
     label_manager : LabelManager,
     label_selected : Selection,
+
+    ui_manager : UIManager,
 }
 
 impl<'a> State<'a> {
+
     // Creating some of the wgpu types requires async code
     // ...
     pub async fn new(window: Arc<Window>) -> State<'a> {
@@ -181,7 +211,7 @@ impl<'a> State<'a> {
 
         // The instance is a handle to our GPU
         // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = egui_wgpu::wgpu::Instance::new(wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
@@ -290,7 +320,6 @@ impl<'a> State<'a> {
         // Camera Buffer
         let mut camera_uniform = Camera::default();
 
-
         let camera_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Camera Buffer"),
@@ -389,129 +418,9 @@ impl<'a> State<'a> {
         });
 
 
-        // Shader_2
-        let shader_2 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Polygon Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("polygon_shader.wgsl").into()),
-        });
+        let label_manager = annotation::manager::setup_label_manager(&device, &config, &camera_bind_group_layout);
+        let ui_manager = ui::ui_manager::setup_ui(&device, &config);
 
-        let render_pipeline_layout_2 = device.create_pipeline_layout(
-            &wgpu::PipelineLayoutDescriptor {
-                label: Some("Polygon Render Pipeline Layout"),
-                bind_group_layouts: &[
-                    &camera_bind_group_layout,
-                ],
-                push_constant_ranges: &[],
-            }
-        );
-
-        let render_pipeline_2 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline 2"),
-            layout: Some(&render_pipeline_layout_2),
-            vertex: wgpu::VertexState {
-                module: &shader_2,
-                entry_point: "vs_main", // 1.
-                buffers: &[
-                    PointVertex::desc(),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState { // 3.
-                module: &shader_2,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState { // 4.
-                    format: config.format,
-                    // blend: Some(wgpu::BlendState::REPLACE),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                // cull_mode: Some(wgpu::Face::),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: None, // 1.
-            multisample: wgpu::MultisampleState {
-                count: 1, // 2.
-                mask: !0, // 3.
-                alpha_to_coverage_enabled: false, // 4.
-            },
-            multiview: None, // 5.
-            cache: None, // 6.
-        });
-
-        // Render Pipeline 3
-        let shader_3 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Line Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("line_shader.wgsl").into()),
-        });
-
-        let render_pipeline_layout_3 = device.create_pipeline_layout(
-            &wgpu::PipelineLayoutDescriptor {
-                label: Some("Line Render Pipeline Layout"),
-                bind_group_layouts: &[
-                    &camera_bind_group_layout,
-                ],
-                push_constant_ranges: &[],
-            }
-        );
-
-        let render_pipeline_3 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline 3"),
-            layout: Some(&render_pipeline_layout_3),
-            vertex: wgpu::VertexState {
-                module: &shader_3,
-                entry_point: "vs_main", // 1.
-                buffers: &[
-                    LineVertex::desc(),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState { // 3.
-                module: &shader_3,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState { // 4.
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: None, // 1.
-            multisample: wgpu::MultisampleState {
-                count: 1, // 2.
-                mask: !0, // 3.
-                alpha_to_coverage_enabled: false, // 4.
-            },
-            multiview: None, // 5.
-            cache: None, // 6.
-        });
-
-
-
-        // new()
         let vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Vertex Buffer"),
@@ -529,19 +438,21 @@ impl<'a> State<'a> {
         );
 
 
+
+        // EGUI
+        let egui_renderer = EguiRenderer::new(&device, config.format, None, 1, &window);
+
         let num_indices = INDICES.len() as u32;
-
-
         Self {
             surface,
             device,
             queue,
             config,
             size,
+            egui_renderer,
+            scale_factor : 1.0,
 
             render_pipeline,
-            render_pipeline_2,
-            render_pipeline_3,
             vertex_buffer,
             index_buffer,
             num_indices,
@@ -556,11 +467,12 @@ impl<'a> State<'a> {
             camera_buffer,
             camera_bind_group,
 
-            label_manager : LabelManager::new(),
+            label_manager,
             label_selected : Selection::None,
+
+            ui_manager,
         }
     }
-
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
@@ -568,14 +480,21 @@ impl<'a> State<'a> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+
+            global::state::WINDOW_SIZE_X.store(new_size.width, std::sync::atomic::Ordering::Relaxed);
+            global::state::WINDOW_SIZE_Y.store(new_size.height, std::sync::atomic::Ordering::Relaxed);
+
+            self.camera.aspect_ratio.0 = new_size.width as f32 / new_size.height as f32;
         }
     }
 
+    pub fn input(&mut self, window : &Window, event: &WindowEvent) -> bool {
+        if self.egui_renderer.handle_input(window, event) {
+            return true;
+        }
 
-    pub fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::MouseInput { device_id : _, state, button} => {
-
                 match button {
                     MouseButton::Left => {
                         match state {
@@ -597,8 +516,13 @@ impl<'a> State<'a> {
                     }
                     _ => {},
                 }
-
             },
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                match new_modifiers.lshift_state() {
+                    winit::keyboard::ModifiersKeyState::Pressed => { set_shift_down(); },
+                    _ => { set_shift_up(); },
+                }
+            }
             WindowEvent::PinchGesture { device_id, delta, phase } => {
                 let change : f32 = 1.00 + (-delta / 5.0) as f32;
                 self.camera.zoom.0 *= change;
@@ -606,8 +530,26 @@ impl<'a> State<'a> {
             WindowEvent::MouseWheel { device_id, delta, phase } => {
                 match delta {
                     winit::event::MouseScrollDelta::LineDelta(_x, y) => {
-                        let change : f32 = 1.00 + (y / 2000.0);
+                        let prev_camera_zoom = self.camera.zoom;
+                        let change : f32 = 1.00 + (y / 100.0);
                         self.camera.zoom.0 *= change;
+
+                        // Differences
+                        let prev_viewed_width : f32 = self.size.width as f32 * prev_camera_zoom.0;
+                        let new_viewed_width : f32 = self.size.width as f32 * self.camera.zoom.0;
+                        let width_difference = new_viewed_width - prev_viewed_width;
+
+                        let prev_viewed_height : f32 = self.size.height as f32 * prev_camera_zoom.0;
+                        let new_viewed_height : f32 = self.size.height as f32 * self.camera.zoom.0;
+                        let height_difference = new_viewed_height - prev_viewed_height;
+
+                        // Zooms the camera on the mouse
+                        let mouse_pos = input_controller::Mouse::get_mouse_pos();
+                        let camera_x_ratio = -1.0 + ((mouse_pos.x * 2) as f32 / self.size.width as f32);
+                        let camera_y_ratio = -1.0 + ((mouse_pos.y * 2) as f32 / self.size.height as f32);
+
+                        self.camera.pos.x -= (width_difference * camera_x_ratio) / 2.0 * self.camera.aspect_ratio.0;
+                        self.camera.pos.y += (height_difference * camera_y_ratio) / 2.0;
                     },
                     winit::event::MouseScrollDelta::PixelDelta(scroll_position) => {
                         self.camera.pos.x += (-scroll_position.x / 2.0) as f32;
@@ -618,11 +560,16 @@ impl<'a> State<'a> {
                 self.camera.zoom.0 = f32::min(self.camera.zoom.0, 10.0);
                 self.camera.zoom.0 = f32::max(self.camera.zoom.0, 0.01);
             },
+            WindowEvent::CursorLeft { device_id } => {
+                self.label_manager.get_edit_label().remove_mouse_point();
+            }
             WindowEvent::CursorMoved { device_id : _, position } => {
                 let new_pos = input_controller::Mouse::MousePosition {
                     x : position.x as isize,
                     y : position.y as isize,
                 };
+                let (x, y) = self.window_to_world_pos(position.x as f32, -position.y as f32);
+                self.label_manager.get_edit_label().add_mouse_point(x, y);
                 input_controller::Mouse::set_mouse_pos(new_pos);
             },
             _ => (),
@@ -630,7 +577,6 @@ impl<'a> State<'a> {
 
         true
     }
-
 
     pub fn window_to_world_pos(&self, mut x : f32, mut y : f32) -> (f32, f32) {
         // Must be converted to image space
@@ -643,6 +589,8 @@ impl<'a> State<'a> {
 
         x *= self.camera.zoom.0;
         y *= self.camera.zoom.0;
+
+        x *= self.camera.aspect_ratio.0;
 
         // Transform to camera position
         x += self.camera.pos.x / ((self.size.width / 2) as f32);
@@ -658,46 +606,96 @@ impl<'a> State<'a> {
         let rmb_state = input_controller::Mouse::get_RMB_state();
         let mouse_pos = input_controller::Mouse::get_mouse_pos();
 
+        let lmb_click : bool = mouse_state == MouseState::Pressed && self.prev_mouse_state == MouseState::Released;
+        let rmb_click : bool = rmb_state == MouseState::Pressed && self.prev_RMB_state == MouseState::Released;
 
-        if mmb_state == MouseState::Pressed {
+        let mut input_already_captured = false;
+
+        if !input_already_captured && lmb_click {
+            // Propagates the click and captures the input
+            if self.ui_manager.propagate_click(mouse_pos.x as u32, mouse_pos.y as u32) {
+                input_already_captured = true;
+            }
+        }
+
+        if !input_already_captured && mmb_state == MouseState::Pressed {
             let change_in_pos = mouse_pos - self.prev_mouse_pos;
 
             self.camera.pos.x -= (change_in_pos.x as f32) * self.camera.zoom.0;
             self.camera.pos.y += (change_in_pos.y as f32) * self.camera.zoom.0;
+
+            input_already_captured = true;
         }
 
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
 
+        let edit_state : EditState = EDIT_STATE.load(std::sync::atomic::Ordering::Relaxed);
 
-        if self.prev_mouse_state== MouseState::Released && mouse_state == MouseState::Pressed {
-            let label_index = match self.label_selected {
-                Selection::None => {
-                    self.label_manager.get_new_label()
-                },
-                Selection::Selected(index) => {
-                    index
-                }
-            };
-            self.label_selected = Selection::Selected(label_index);
-
+        if !input_already_captured && lmb_click {
             // These points need to be translated to image space...
             let (x, y) = self.window_to_world_pos(mouse_pos.x as f32, -mouse_pos.y as f32);
 
-            let label = self.label_manager.get_label_at_index(label_index);
-            label.point_list.add_point(x, y);
+            match edit_state {
+                EditState::New | EditState::Additive | EditState::Subtract => {
+                    let edit_label = self.label_manager.get_edit_label();
+                    edit_label.add_point(x, y);
+                    input_already_captured = true;
+                },
+                EditState::Select => {
+                    let mouse_coord = coord!{x : x, y: y};
+
+                    // Must hold shift for this..
+                    if let Some(poly_index) = self.label_manager.get_poly_at_point(mouse_coord) {
+                        // Ensures it is not already in the list
+                        let not_in = match &self.label_selected {
+                            Selection::Selected(selected) => { selected != &poly_index},
+                            Selection::MultiSelection(selections) => { !selections.contains(&poly_index) },
+                            _ => true,
+                        } || get_shift_state() == KeyState::Released;
+
+                        // Adds it to the list
+                        if not_in {
+                            self.label_selected = match &mut self.label_selected {
+                                Selection::None => { Selection::Selected(poly_index) },
+                                Selection::Selected(selected) => {
+                                    match get_shift_state() {
+                                        KeyState::Pressed => { Selection::MultiSelection([*selected, poly_index].to_vec()) },
+                                        KeyState::Released => { Selection::Selected(poly_index) }
+                                    }
+                                },
+                                Selection::MultiSelection(selections) => {
+                                    match get_shift_state() {
+                                        KeyState::Pressed => {
+                                            selections.push(poly_index); // This should be fixed!
+                                            Selection::MultiSelection(selections.clone())
+                                        },
+                                        KeyState::Released => { Selection::Selected(poly_index) }
+                                    }
+                                },
+                            }
+                        }
+                    } else {
+                        self.label_selected = Selection::None;
+                    }
+                },
+            }
+
+            input_already_captured = true;
         }
 
-        if self.prev_RMB_state == MouseState::Released && rmb_state == MouseState::Pressed {
-            self.label_selected = Selection::None;
+        if !input_already_captured && rmb_click {
+            self.label_manager.propagate_edit_label(&self.label_selected, &edit_state);
+            input_already_captured = true;
         }
 
+        // Saving previous states
         self.prev_mouse_pos = mouse_pos;
         self.prev_RMB_state = rmb_state;
         self.prev_MMB_state = mmb_state;
         self.prev_mouse_state = mouse_state;
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, window : &Window) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
 
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -734,104 +732,91 @@ impl<'a> State<'a> {
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 1.
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1); // 2.
 
+            self.label_manager.render(
+                &self.device, &mut render_pass, &mut self.queue, &self.camera_bind_group, &self.camera, &self.label_selected,
+            );
+            self.ui_manager.render(&mut render_pass, &mut self.queue);
+        }
 
-            let labels = self.label_manager.get_labels();
-            // Draw the Lines
-            for label in labels {
-                if let Some((line_points, line_indices)) = label.get_draw_line(self.camera.zoom.0) {
-                    let vertex_buffer_3 = self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("Vertex Buffer"),
-                            contents: bytemuck::cast_slice(line_points.as_slice()),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        }
-                    );
+        {
+            self.egui_renderer.begin_frame(&window);
 
-                    let index_buffer_3 = self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("Index Buffer"),
-                            contents: bytemuck::cast_slice(line_indices.as_slice()),
-                            usage: wgpu::BufferUsages::INDEX,
-                        }
-                    );
-                    render_pass.set_pipeline(&self.render_pipeline_3);
-                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, vertex_buffer_3.slice(..));
-                    render_pass.set_index_buffer(index_buffer_3.slice(..), wgpu::IndexFormat::Uint16);
-                    render_pass.draw_indexed(0..line_indices.len() as u32, 0, 0..1); // 2.
-                }
-            }
+            egui::Window::new("winit + egui + wgpu says hello!")
+                .resizable(true)
+                .vscroll(true)
+                .default_open(true)
+                .show(self.egui_renderer.context(), |ui| {
+                    ui.label("Label!");
 
-
-            for label in labels {
-                if let Some(tris) = label.to_point_vertices() {
-                    let tri_vertices : &[PointVertex] = &tris[0..tris.len()];
-
-                    // I_Triangle
-                    let mut i_vec : Vec<F64Point> = Vec::new();
-
-                    for tri in tri_vertices {
-                        i_vec.push(
-                            F64Point {
-                                x : tri.position[0] as f64,
-                                y : tri.position[1] as f64,
-                            }
-                        );
+                    if ui.button("Button!").clicked() {
+                        println!("boom!")
                     }
 
-                    let shape = [
-                        i_vec,
-                        [].to_vec(),
-                    ].to_vec();
-
-                    let triangulation = shape.to_triangulation(Some(FillRule::NonZero), 0.0);
-
-                    let mut index = 0;
-                    let mut real_tri_vertices : Vec<PointVertex> = Vec::new();
-                    for tri in triangulation.points {
-                        let mut array : [f32; 3] = [0.0, 0.0, 0.0];
-                        array[index] = 1.0;
-                        real_tri_vertices.push(
-                            PointVertex {
-                                position : [tri.x as f32, tri.y as f32, 0.0],
-                                value : array,
-                            }
-                        );
-                        index += 1;
-                        index = index % 3;
-                    }
-
-                    let mut tri_indices : Vec<u16> = Vec::new();
-                    for index in triangulation.indices {
-                        tri_indices.push(index as u16);
-                    }
-
-                    let indices_2_len = tri_indices.len();
-
-                    let vertex_buffer_2 = self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("Vertex Buffer"),
-                            contents: bytemuck::cast_slice(real_tri_vertices.as_slice()),
-                            usage: wgpu::BufferUsages::VERTEX,
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "Pixels per point: {}",
+                            self.egui_renderer.context().pixels_per_point()
+                        ));
+                        if ui.button("-").clicked() {
+                            self.scale_factor = (self.scale_factor - 0.1).max(0.3);
                         }
-                    );
-
-                    let index_buffer_2 = self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("Index Buffer"),
-                            contents: bytemuck::cast_slice(tri_indices.as_slice()),
-                            usage: wgpu::BufferUsages::INDEX,
+                        if ui.button("+").clicked() {
+                            self.scale_factor = (self.scale_factor + 0.1).min(3.0);
                         }
-                    );
+                    });
 
-                    render_pass.set_pipeline(&self.render_pipeline_2); // 2.
-                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]); // NEW!
-                    render_pass.set_vertex_buffer(0, vertex_buffer_2.slice(..));
-                    render_pass.set_index_buffer(index_buffer_2.slice(..), wgpu::IndexFormat::Uint16);
-                    // render_pass.draw(0..tris.len() as u32, 0..1);
-                    render_pass.draw_indexed(0..indices_2_len as u32, 0, 0..1); // 2.
-                }
-            }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Select").clicked() {
+                            EDIT_STATE.store(EditState::Select, Relaxed);
+                        };
+                        if ui.button("New").clicked() {
+                            EDIT_STATE.store(EditState::New, Relaxed);
+                        };
+                        if ui.button("Add").clicked() {
+                            EDIT_STATE.store(EditState::Additive, Relaxed);
+                        };
+                        if ui.button("Subtract").clicked() {
+                            EDIT_STATE.store(EditState::Subtract, Relaxed);
+                        };
+                    });
+                    ui.separator();
+                    if ui.button("Merge").clicked() {
+                        // Merge
+                        self.label_manager.merge_selected_labels(&self.label_selected);
+                        self.label_selected = Selection::None;
+                    };
+                    if ui.button("Split").clicked() {
+                        // Merge
+                        self.label_manager.split_selected_labels(&self.label_selected);
+                        self.label_selected = Selection::None;
+                    }
+                });
+
+            let screen_descriptor = ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: window.scale_factor() as f32
+                * self.scale_factor,
+            };
+
+            // let surface_texture = self
+            //     .surface
+            //     .get_current_texture()
+            //     .expect("Failed to acquire next swap chain texture");
+
+            let surface_view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
+            self.egui_renderer.end_frame_and_draw(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                window,
+                &surface_view,
+                screen_descriptor,
+            );
         }
 
         // submit will accept anything that implements IntoIter
@@ -840,4 +825,6 @@ impl<'a> State<'a> {
 
         Ok(())
     }
+
+
 }
